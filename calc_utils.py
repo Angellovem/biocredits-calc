@@ -1,3 +1,17 @@
+"""
+BioCredits Calculation Utilities - Refactored with Adapter Pattern
+
+This module contains all the geographic processing and calculation logic for BioCredits.
+Data operations are now decoupled through the DataAdapter interface, allowing easy
+switching between different data sources (Airtable, PostgreSQL, MongoDB, etc.).
+
+Usage with adapter:
+    from airtable_adapter import AirtableAdapter
+    from calc_utils import download_kml_official
+    
+    adapter = AirtableAdapter()
+    data = download_kml_official(adapter)
+"""
 import os
 import requests
 import shutil
@@ -22,144 +36,41 @@ import zipfile
 import traceback
 from plotly.subplots import make_subplots
 
+from data_adapter import DataAdapter
+
 def load_config():
+    """Load configuration from config.json file."""
     with open('config.json', 'r') as f:
         return json.load(f)
 
-def download_kml_official(save_directory='KML/', save_shp_directory='SHPoriginal/'):
+def download_kml_official(adapter: DataAdapter, save_directory='KML/', 
+                         save_shp_directory='SHPoriginal/'):
     """
-    Download KML files and shapefiles from Airtable, and additional metadata.
-    Only process rows that have either KML or shapefile data.
+    Download KML files and shapefiles using the provided data adapter.
+    
+    Args:
+        adapter: DataAdapter instance for data operations
+        save_directory: Directory to save KML files
+        save_shp_directory: Directory to save shapefiles
+        
+    Returns:
+        DataFrame with land metadata
     """
-    # Create directories if they don't exist
-    for directory in [save_directory, save_shp_directory]:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-        else:
-            shutil.rmtree(directory)
-            os.makedirs(directory)
+    return adapter.download_land_data(save_directory, save_shp_directory)
 
-    config = load_config()
-    BASE_ID = config['KML_TABLE']['BASE_ID']
-    TABLE_NAME = config['KML_TABLE']['TABLE_NAME']
-    VIEW_ID = config['KML_TABLE']['VIEW_ID']
-    FIELD = config['KML_TABLE']['FIELD']
-    PERSONAL_ACCESS_TOKEN = config['PERSONAL_ACCESS_TOKEN']
-
-    AIRTABLE_ENDPOINT = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}"
-    headers = {
-        "Authorization": f"Bearer {PERSONAL_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    # Create caches for POD and project_biodiversity lookups
-    pod_cache = {}
-    proj_bio_cache = {}
-
-    all_records = []
-    offset = None
-    while True:
-        params = {'view':VIEW_ID}
-        if offset:
-            params["offset"] = offset
-
-        response = requests.get(AIRTABLE_ENDPOINT, headers=headers, params=params)
-        response_json = response.json()
-        
-        records = response_json.get('records')
-        all_records.extend(records)
-        
-        offset = response_json.get('offset')
-        if not offset:
-            break
-
-    # Create a list to store metadata
-    metadata = []
-    good_plots = 0
-    shp_downloaded = 0
-    total_records = 0
+def kml_to_shp(source_directory='KML/', destination_directory='SHP/', 
+               original_shp_directory='SHPoriginal/', verbose=False, adapter=None):
+    """
+    Convert KML files to shapefiles using ogr2ogr.
+    Prioritizes original shapefiles if available.
     
-    for record in all_records:
-        fields = record['fields']
-        kml_field = fields.get(FIELD)
-        shapefile = fields.get('shapefile_polygon')
-        
-        # Skip if neither KML nor shapefile is available
-        if not kml_field and not shapefile:
-            continue
-            
-        total_records += 1
-        plot_id = str(fields.get('plot_id'))
-        plot_id = f"{plot_id:0>3}"
-        
-        # Download KML if available
-        if kml_field:
-            url = kml_field[0]['url']
-            save_path = os.path.join(save_directory, plot_id+'.kml')
-            
-            with requests.get(url, stream=True) as file_response:
-                with open(save_path, 'wb') as file:
-                    for chunk in file_response.iter_content(chunk_size=8192):
-                        file.write(chunk)
-            good_plots += 1
-            print(f"Downloaded KML for plot_id {plot_id}")
-
-        # Download and extract shapefile if available
-        if shapefile:
-            url = shapefile[0]['url']
-            # Create a directory for this plot's shapefile
-            plot_shp_dir = os.path.join(save_shp_directory, plot_id)
-            if not os.path.exists(plot_shp_dir):
-                os.makedirs(plot_shp_dir)
-            
-            # Download the zip file
-            zip_path = os.path.join(plot_shp_dir, f"{plot_id}.zip")
-            with requests.get(url, stream=True) as file_response:
-                with open(zip_path, 'wb') as file:
-                    for chunk in file_response.iter_content(chunk_size=8192):
-                        file.write(chunk)
-            
-            # Extract the zip file
-            try:
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(plot_shp_dir)
-                print(f"Downloaded and extracted shapefile for plot_id {plot_id}")
-                # Remove the zip file after extraction
-                os.remove(zip_path)
-                shp_downloaded += 1
-            except zipfile.BadZipFile:
-                print(f"Error: Invalid zip file for plot_id {plot_id}")
-                continue
-
-        # Fetch actual values for POD and project_biodiversity
-        pod_id = fields.get('POD', [''])[0] if isinstance(fields.get('POD'), list) else fields.get('POD', '')
-        proj_bio_id = fields.get('project_biodiversity', [''])[0] if isinstance(fields.get('project_biodiversity'), list) else fields.get('project_biodiversity', '')
-
-        pod_name = fetch_linked_record_name(pod_id, headers, pod_cache, AIRTABLE_ENDPOINT, 'CODE') if pod_id else ''
-        proj_bio_name = fetch_linked_record_name(proj_bio_id, headers, proj_bio_cache, AIRTABLE_ENDPOINT, 'project_id') if proj_bio_id else ''
-
-        # Collect metadata with actual values
-        metadata.append({
-            'plot_id': plot_id.zfill(3),
-            'POD': pod_name,
-            'project_biodiversity': proj_bio_name,
-            'area_certifier': fields.get('area_certifier', 0)
-        })
-
-    # Save metadata to DataFrame
-    metadata_df = pd.DataFrame(metadata)
-    metadata_df.to_csv('land_metadata.csv', index=False)
-    
-    # Add logging for linked records
-    insert_log_entry('Unique PODs found:', str(metadata_df['POD'].value_counts(dropna=False).to_dict()))
-    insert_log_entry('Unique Project Biodiversity found:', str(metadata_df['project_biodiversity'].value_counts(dropna=False).to_dict()))
-    
-    insert_log_entry('Total records with KML or shapefile:', str(total_records))
-    insert_log_entry('Total KMLs downloaded:', str(good_plots))
-    insert_log_entry('Total shapefiles downloaded:', str(shp_downloaded))
-    return metadata_df
-
-def kml_to_shp(source_directory='KML/', destination_directory='SHP/', original_shp_directory='SHPoriginal/', verbose=False):
+    Args:
+        source_directory: Directory containing KML files
+        destination_directory: Directory to save shapefiles
+        original_shp_directory: Directory containing original shapefiles
+        verbose: Whether to log errors
+        adapter: Optional DataAdapter for logging
+    """
     # Ensure the destination directory exists
     if not os.path.exists(destination_directory):
         os.makedirs(destination_directory)
@@ -224,8 +135,8 @@ def kml_to_shp(source_directory='KML/', destination_directory='SHP/', original_s
                 print(f"Error converting {filename} to {base_name}.shp")
             else:
                 print(f"Converted {filename} to {base_name}.shp")
-    if verbose:
-        insert_log_entry('Error in plots:', ', '.join(error_list))
+    if verbose and adapter:
+        insert_log_entry(adapter, 'Error in plots:', ', '.join(error_list))
 
 def load_shp(directory='SHP/'):
     # Loop through all subdirectories in the SHP directory
@@ -263,7 +174,7 @@ def set_z_to_zero(coord):
     x, y, _ = coord
     return (x, y, 0)
 
-def normalize_shps(gdfs, logs=False):
+def normalize_shps(gdfs, logs=False, adapter=None):
     """
     Given a dictionary of GeoDataFrames:
         1) Convert each geometry to Polygon or MultiPolygon
@@ -344,13 +255,13 @@ def normalize_shps(gdfs, logs=False):
 
     # Log the geometry types found
     for geom_type, plot_ids in geometry_types_found.items():
-        if logs:
-            insert_log_entry(f'Geometry type {geom_type} found in plots:', ', '.join(plot_ids))
+        if logs and adapter:
+            insert_log_entry(adapter, f'Geometry type {geom_type} found in plots:', ', '.join(plot_ids))
         print(f'Geometry type {geom_type} found in plots:', ', '.join(plot_ids))
     
-    if logs:
-        insert_log_entry('CRS found in plots:', ', '.join([f'{crs}: {count}' for crs, count in found_crs_count.items()]))
-        insert_log_entry('Total plots processed:', str(len(lands)))
+    if logs and adapter:
+        insert_log_entry(adapter, 'CRS found in plots:', ', '.join([f'{crs}: {count}' for crs, count in found_crs_count.items()]))
+        insert_log_entry(adapter, 'Total plots processed:', str(len(lands)))
     print('CRS found in plots:', ', '.join([f'{crs}: {count}' for crs, count in found_crs_count.items()]))
     print('Total plots processed:', str(len(lands)))
     return lands
@@ -615,94 +526,17 @@ def slider_plot(fig, scores_gdf, obs_expanded, n_weeks=1, min_date='2023-01-01',
     save_without_animations(fig, filename)
     return fig
 
-def fetch_linked_record_name(record_id, headers, cache, AIRTABLE_ENDPOINT, field_name='species_name_common_es'):
+def download_observations(adapter: DataAdapter):
     """
-    Fetch the name of a linked record from Airtable.
-    Modified to handle different field names for different tables.
-    """
-    if record_id in cache:
-        return cache[record_id]
-    response = requests.get(f"{AIRTABLE_ENDPOINT}/{record_id}", headers=headers)
-    if response.status_code == 200:
-        data = response.json()
-        value = data['fields'].get(field_name)
-        cache[record_id] = value
-        return value
-    else:
-        print(f"Error fetching record {record_id}:", response.text)
-        return None
-
-def download_observations():
-    """
-    Download KML files from Airtable
-    """
-    config = load_config()
-    BASE_ID = config['OBS_TABLE']['BASE_ID']
-    TABLE_ID = config['OBS_TABLE']['TABLE_ID']
-    VIEW_ID = config['OBS_TABLE']['VIEW_ID']
-    PERSONAL_ACCESS_TOKEN = config['PERSONAL_ACCESS_TOKEN']
-    AIRTABLE_ENDPOINT = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}"
-
-    headers = {
-        "Authorization": f"Bearer {PERSONAL_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    all_records = []
-    offset = None
-
-    while True:
-        params = {'view':VIEW_ID}
-        if offset:
-            params["offset"] = offset
-
-        response = requests.get(AIRTABLE_ENDPOINT, headers=headers, params=params)
-        response_json = response.json()
+    Download biodiversity observations using the provided data adapter.
+    
+    Args:
+        adapter: DataAdapter instance for data operations
         
-        records = response_json.get('records')
-        all_records.extend(records)
-        
-        offset = response_json.get('offset')
-        if not offset:
-            break
-
-    insert_log_entry('Total observations fetched:', str(len(all_records)))
-
-    records = pd.DataFrame([r['fields'] for r in all_records])
-    # keep records with NIVEL de CREDITO (from SPECIES (ES))
-    records = records[[not r is np.nan for r in records["integrity_score"]]]
-    insert_log_entry('Observations with integrity score:', str(len(records)))
-    # transform and create columns
-    #records['species_id'] = records['species_id'].apply(lambda x: x[0] if type(x)==list else x) # we might need a fetch_linked_record_name
-    records['name_latin'] = records['name_latin'].apply(lambda x: x[0] if type(x)==list and len(x)==1 else str(x))
-    records['score'] = records['integrity_score'].apply(lambda x: max(x) if type(x)==list else x)
-    records['radius'] = records['calc_radius'].apply(lambda x: round(max(x),2) if type(x)==list else x)   # using max radius of row
-    cache = {}
-    records['name_common'] = records['name_common_es'].apply(lambda x: x[0] if type(x)==list and len(x)==1 else str(x))
-    records['name_common_'] = records['species_type'].apply(
-        lambda x: fetch_linked_record_name(x[0], headers, cache, AIRTABLE_ENDPOINT) if type(x)==list and len(x)==1 else None)
-    # We are assuming one observation per record, so we can use the first element of the list, max radius, etc.
-
-    # filter records with radius > 0 and eco_long < 0
-    records = records.query('radius>0')
-    insert_log_entry('Observations with radius > 0:', str(len(records)))
-    records = records.query('eco_long<0')
-    insert_log_entry('Observations with eco_long < 0:', str(len(records)))
-
-    # renaming and keeping columns
-    records = records.rename(columns={'# ECO':'eco_id', 'eco_lat':'lat', 'eco_long':'long'})
-    keep_columns = ['eco_id','eco_date', 'name_common', 'name_latin', 'radius', 'score', 'lat','long','iNaturalist']
-    records = records[keep_columns].sort_values(by=['eco_date'])
-    records['eco_date'] = pd.to_datetime(records['eco_date'])
-    # filtering out observations older than 5 years
-    records = records[records['eco_date'] >= (pd.Timestamp.now() - pd.DateOffset(years=10))]
-    insert_log_entry('Observations < 10 years old:', str(len(records)))
-    insert_log_entry('Observations WITHOUT iNaturalist:', str(records['iNaturalist'].isna().sum()))
-    insert_log_entry('Observations used:', str(len(records)))
-    insert_log_entry('Scores seen:', str(list(np.sort(records['score' ].unique())[::-1])))
-    insert_log_entry('Radius seen:', str(list(np.sort(records['radius'].unique())[::-1])))
-    records.sort_values('eco_date', ascending=False, inplace=True)
-    return records
+    Returns:
+        DataFrame with observation data
+    """
+    return adapter.download_observations()
 
 def observations_to_circles(records, default_crs=4326, buffer_crs=6262):
     # Convert the DataFrame to a GeoDataFrame
@@ -1006,118 +840,39 @@ def cummulative_attribution(attr_month, cutdays= 30, start_date = None):
     a['credits_imrv'] = (a['credits_all'] * (1 - a['proportion_certified'])).apply(lambda x: max(x,0))
     return a
 
-def delete_all_records_from_airtable(HEADERS, API_URL):
-    # Initialize an empty list to collect all record ids
-    all_record_ids = []
-
-    # First fetch to initialize pagination
-    response = requests.get(API_URL, headers=HEADERS)
-    if response.status_code != 200:
-        print("Error fetching record IDs:", response.text)
-        return False
-
-    records = response.json().get('records', [])
-    all_record_ids.extend([record['id'] for record in records])
+def insert_gdf_to_airtable(adapter: DataAdapter, gdf, table, insert_geo = False, delete_all = False):
+    """
+    Upload GeoDataFrame to data destination using the adapter.
     
-    # Continue fetching records until we've got them all
-    while 'offset' in response.json():
-        offset = response.json().get('offset')
-        response = requests.get(f"{API_URL}?offset={offset}", headers=HEADERS)
-        records = response.json().get('records', [])
-        all_record_ids.extend([record['id'] for record in records])
+    Args:
+        adapter: DataAdapter instance for data operations
+        gdf: GeoDataFrame to upload
+        table: Table name
+        insert_geo: Whether to include geometry column
+        delete_all: Whether to delete existing records first
+    """
+    adapter.upload_results(gdf, table, insert_geo, delete_all)
 
-    # Delete the records using their IDs
-    for record_id in all_record_ids:
-        del_response = requests.delete(f"{API_URL}/{record_id}", headers=HEADERS)
-        time.sleep(0.2)
-        if del_response.status_code != 200:
-            print(f"Error deleting record {record_id}:", del_response.text)
-
-    return True
-
-
-def insert_gdf_to_airtable(gdf, table, insert_geo = False, delete_all = False):
-    gdf = gdf.copy()
-    config = load_config()
-    BASE_ID = config['BIOCREDITS-CALC']['BASE_ID']
-    PERSONAL_ACCESS_TOKEN = config['PAT_BIOCREDITS-CALC']
-
-    if insert_geo and 'geometry' in gdf.columns:
-        gdf['geometry'] = gdf['geometry'].apply(lambda x: x.wkt)
-    elif not insert_geo and 'geometry' in gdf.columns:
-        gdf.drop(columns=['geometry'], inplace=True)
-
-    for col in gdf.columns:
-        if gdf[col].dtype == 'datetime64[ns]':
-            gdf[col] = gdf[col].astype(str)
-        if gdf[col].dtype == 'O':
-            gdf[col] = gdf[col].astype(str)
-
-    gdf.fillna('', inplace=True)
-    # Convert GeoDataFrame to list of records
-    records = gdf.to_dict('records')
-
-    # API endpoint and headers
-    API_URL = f"https://api.airtable.com/v0/{BASE_ID}/{table}"
-    HEADERS = {
-        "Authorization": f"Bearer {PERSONAL_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
+def insert_log_entry(adapter: DataAdapter, event, info):
+    """
+    Log an entry using the adapter.
     
-    if delete_all:
-        # Delete all records
-        if not delete_all_records_from_airtable(HEADERS, API_URL):
-            print("Error deleting records. Aborting insertion.")
-            return
+    Args:
+        adapter: DataAdapter instance for data operations
+        event: Event name/type
+        info: Event information/details
+    """
+    adapter.log_entry(event, info)
 
-
-    batch_size = 10
-    chunks = [records[i:i + batch_size] for i in range(0, len(records), batch_size)]
-
-    for chunk in chunks:
-        json_call = {"records": [{"fields": record} for record in chunk]}
-        response = requests.post(API_URL, headers=HEADERS, json=json_call)
-        time.sleep(0.2)
-        if response.status_code != 200:
-            print("Error:", response.text)
-
-def trigger_delete_webhook(table):
-    config = load_config()
-    HEADERS = {"Content-Type": "application/json"}
-    url = config["BIOCREDITS-CALC"]["DELETE_TABLE_WEBHOOK"][table]
-    requests.post(url, headers=HEADERS, data="{}")
-
-def insert_log_entry(event, info):
-    df = pd.DataFrame({'Event': [event],'Info': [info]})
-    insert_gdf_to_airtable(df, "Logs", insert_geo=False, delete_all=False)
-
-
-def clear_biocredits_tables(tables):
-    for table in tables:
-        trigger_delete_webhook(table)
-    for table in tables:
-        trigger_delete_webhook(table)
-    time.sleep(5)
-
-    delete_again = []
-    config = load_config()
-    BASE_ID = config['BIOCREDITS-CALC']['BASE_ID']
-    PERSONAL_ACCESS_TOKEN = config['PAT_BIOCREDITS-CALC']
-    for TABLE_NAME in tables:
-        AIRTABLE_ENDPOINT = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}"
-        headers = {
-            "Authorization": f"Bearer {PERSONAL_ACCESS_TOKEN}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.get(AIRTABLE_ENDPOINT, headers=headers)
-        response_json = response.json()
-        if len(response_json['records']) > 0:
-            delete_again.append(TABLE_NAME)
-    if len(delete_again) > 0:
-        clear_biocredits_tables(delete_again)
-
-    time.sleep(10)
+def clear_biocredits_tables(adapter: DataAdapter, tables):
+    """
+    Clear tables using the adapter.
+    
+    Args:
+        adapter: DataAdapter instance for data operations
+        tables: List of table names to clear
+    """
+    adapter.clear_tables(tables)
 
 def create_bucket(storage_client, bucket_name):
     bucket = storage_client.bucket(bucket_name)
@@ -1139,43 +894,17 @@ def upload_to_gcs(bucket_name, source_file_name, destination_blob_name):
     #print(f"File {source_file_name} uploaded to {destination_blob_name} and is now publicly accessible.")
     return blob.public_url
 
-def get_area_certifier():
-    config = load_config()
-    BASE_ID = config['KML_TABLE']['BASE_ID']
-    TABLE_NAME = config['KML_TABLE']['TABLE_NAME']
-    VIEW_ID = config['KML_TABLE']['VIEW_ID']
-    FIELD = config['KML_TABLE']['FIELD']
-    PERSONAL_ACCESS_TOKEN = config['PERSONAL_ACCESS_TOKEN']
-    AIRTABLE_ENDPOINT = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}"
-    headers = {
-        "Authorization": f"Bearer {PERSONAL_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    all_records = []
-    offset = None
-    while True:
-        params = {'view':VIEW_ID}
-        if offset:
-            params["offset"] = offset
-
-        response = requests.get(AIRTABLE_ENDPOINT, headers=headers, params=params)
-        response_json = response.json()
+def get_area_certifier(adapter: DataAdapter):
+    """
+    Get area certifier data using the adapter.
+    
+    Args:
+        adapter: DataAdapter instance for data operations
         
-        records = response_json.get('records')
-        all_records.extend(records)
-        
-        offset = response_json.get('offset')
-        if not offset:
-            break
-
-    area_cert = []
-    for record in all_records:
-        a = {}
-        a['plot_id'] = record['fields'].get('plot_id')
-        a['area_certifier'] = record['fields'].get('area_certifier')
-        area_cert.append(a)
-    return pd.DataFrame(area_cert).fillna(0)
+    Returns:
+        DataFrame with area certifier data
+    """
+    return adapter.get_area_certifier()
 
 def transform_one_row_per_value(df, mode):
     result = {}
