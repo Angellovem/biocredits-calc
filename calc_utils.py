@@ -126,15 +126,37 @@ def kml_to_shp(source_directory='KML/', destination_directory='SHP/',
             destination_file_path = os.path.join(plot_shp_dir, base_name + '.shp')
             
             # Convert KML to SHP using ogr2ogr
-            cmd = ['ogr2ogr', '-f', 'ESRI Shapefile', destination_file_path, source_file_path]
-            subprocess.run(cmd)
+            # Use -nlt PROMOTE_TO_MULTI to handle mixed geometry types and promote to MultiPolygon
+            # -skipfailures allows processing to continue even if some features fail
+            cmd = ['ogr2ogr', '-f', 'ESRI Shapefile', '-nlt', 'PROMOTE_TO_MULTI', 
+                   '-skipfailures', destination_file_path, source_file_path]
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                print(f"Converted {filename} to {base_name}.shp")
+            except FileNotFoundError:
+                error_msg = (
+                    f"Error: 'ogr2ogr' command not found. "
+                    f"Please install GDAL/OGR tools for Windows.\n"
+                    f"You can install it via:\n"
+                    f"  1. OSGeo4W: https://trac.osgeo.org/osgeo4w/\n"
+                    f"  2. Conda: conda install -c conda-forge gdal\n"
+                    f"  3. Or download from: https://gdal.org/download.html"
+                )
+                print(error_msg)
+                error_list.append(base_name)
+                if adapter:
+                    insert_log_entry(adapter, 'ogr2ogr not found', error_msg)
+                raise
+            except subprocess.CalledProcessError as e:
+                print(f"Error converting {filename} to {base_name}.shp")
+                print(f"Command output: {e.stderr}")
+                error_list.append(base_name)
             
             # Check if the file was created
             if not os.path.exists(destination_file_path):
-                error_list.append(base_name)
-                print(f"Error converting {filename} to {base_name}.shp")
-            else:
-                print(f"Converted {filename} to {base_name}.shp")
+                if base_name not in error_list:
+                    error_list.append(base_name)
+                print(f"Error: {destination_file_path} was not created")
     if verbose and adapter:
         insert_log_entry(adapter, 'Error in plots:', ', '.join(error_list))
 
@@ -290,7 +312,7 @@ def shp_to_land(lands, crs = "EPSG:4326", area_crs = "EPSG:6262"):
     return lands
 
 def plot_land(lands, filename='lands.html'):
-    centroid = lands[lands['geometry'].is_valid].unary_union.centroid
+    centroid = lands[lands['geometry'].is_valid].union_all().centroid
     fig = px.choropleth_mapbox(lands, geojson=lands.geometry, locations=lands.index, color=lands.index,
                                 color_discrete_sequence=["red"], zoom=9.8, center = {"lat": centroid.coords.xy[1][0], "lon": centroid.coords.xy[0][0]},
                                 opacity=0.5, labels={'index':'Finca'})
@@ -387,11 +409,6 @@ def interpolate_color(score, color_scale):
     # print(f" Interpolating for score {score}, len(keys): {len(keys)}, keys: {keys}")
     # error: Interpolating for score 0.3, len(keys): 5, keys: [0.4, 0.5, 0.8, 0.9, 1.0]
     if score < keys[0]:  
-        return color_scale[keys[0]]
-    if score > keys[-1]:
-        return color_scale[keys[-1]]
-
-    if score < keys[0]:
         return color_scale[keys[0]]
     if score > keys[-1]:
         return color_scale[keys[-1]]
@@ -619,7 +636,7 @@ def venn_decomposition(polygons, scores):
         if not polygons:
             first_diff = first_poly
         else:
-            first_diff = first_poly.difference(gpd.GeoSeries(polygons).unary_union)
+            first_diff = first_poly.difference(gpd.GeoSeries(polygons).union_all())
         if not first_diff.is_empty:
             all_geoms_and_scores.append((first_diff, first_score))
 
@@ -733,7 +750,7 @@ def daily_attibution(eco_score, lands, obs_expanded, crs=6262):
     fincas6262 = lands.to_crs(epsg=crs)
     eco_score6262 = eco_score.to_crs(epsg=crs)
     obs_expanded6262 = obs_expanded.to_crs(epsg=crs)
-    result_df = pd.DataFrame()
+    result_dfs = []
     fincas_reset = fincas6262.reset_index().rename(columns={'index': 'plot_id'}) if not 'plot_id' in fincas6262.columns else fincas6262
 
     #fincas_reset['total_area'] = fincas_reset['geometry'].area / 10000
@@ -760,7 +777,10 @@ def daily_attibution(eco_score, lands, obs_expanded, crs=6262):
         if not 'value' in intersections.columns:
             temp_df.drop(columns=['value'], inplace=True, errors='ignore')
         
-        result_df = pd.concat([result_df, temp_df])
+        result_dfs.append(temp_df)
+    
+    # Concatenate all results at once (more efficient and avoids deprecation warning)
+    result_df = pd.concat(result_dfs, ignore_index=True) if result_dfs else pd.DataFrame()
     result_df['area_score'] = result_df['area_intersect'] * result_df['score']
     # Reset index of the final result
     attribution = result_df.reset_index(drop=True)
@@ -883,16 +903,35 @@ def create_bucket(storage_client, bucket_name):
         print(f"Bucket {bucket_name} already exists.")
 
 def upload_to_gcs(bucket_name, source_file_name, destination_blob_name):
-    storage_client = storage.Client.from_service_account_json('the-savimbo-project-511c079217f8.json')
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(destination_blob_name)
-    if blob.exists():
-        blob.delete()
-    blob.cache_control = 'no-cache, no-store, must-revalidate'
-    blob.upload_from_filename(source_file_name)
-    blob.make_public()
-    #print(f"File {source_file_name} uploaded to {destination_blob_name} and is now publicly accessible.")
-    return blob.public_url
+    """Upload a file to Google Cloud Storage bucket."""
+    credentials_file = 'the-savimbo-project-511c079217f8.json'
+    
+    # Check if credentials file exists
+    if not os.path.exists(credentials_file):
+        error_msg = f"Warning: Google Cloud credentials file '{credentials_file}' not found. Skipping upload."
+        print(error_msg)
+        # Return a local file path instead of a GCS URL
+        return f"local://{os.path.abspath(source_file_name)}"
+    
+    try:
+        storage_client = storage.Client.from_service_account_json(credentials_file)
+        try:
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(destination_blob_name)
+            if blob.exists():
+                blob.delete()
+            blob.cache_control = 'no-cache, no-store, must-revalidate'
+            blob.upload_from_filename(source_file_name)
+            blob.make_public()
+            print(f"File {source_file_name} uploaded to {destination_blob_name} and is now publicly accessible.")
+            return blob.public_url
+        finally:
+            # Always close the client to prevent resource leaks
+            storage_client.close()
+    except Exception as e:
+        error_msg = f"Warning: Failed to upload to GCS: {str(e)}. File saved locally."
+        print(error_msg)
+        return f"local://{os.path.abspath(source_file_name)}"
 
 def get_area_certifier(adapter: DataAdapter):
     """
@@ -1066,16 +1105,14 @@ def plot_project_credits(project_credits, project_id):
         plot_bgcolor='rgba(240,240,240,0.5)',
         hovermode='x unified',
         yaxis=dict(
-            title="Union Credits",
-            titlefont=dict(color="blue"),
+            title=dict(text="Union Credits", font=dict(color="blue")),
             tickfont=dict(color="blue"),
             showgrid=True,
             gridcolor='white',
             side='left'
         ),
         yaxis2=dict(
-            title="Buffer Credits",
-            titlefont=dict(color="green"),
+            title=dict(text="Buffer Credits", font=dict(color="green")),
             tickfont=dict(color="green"),
             overlaying="y",
             side="right",

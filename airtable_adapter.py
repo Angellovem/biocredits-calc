@@ -29,6 +29,11 @@ class AirtableAdapter(ConfigurableAdapter):
         """
         super().__init__(config)
         self._record_cache: Dict[str, Dict[str, Any]] = {}
+        # Rate limiting support
+        self._last_request_time = 0
+        self._min_request_interval = 0.21  # 200ms between requests (5 req/sec limit)
+        self._last_request_time = 0
+        self._min_request_interval = 0.21  # 200ms between requests for rate limiting
     
     def _get_headers(self, token_key: str = 'PERSONAL_ACCESS_TOKEN') -> Dict[str, str]:
         """Get Airtable API headers with authentication."""
@@ -38,9 +43,23 @@ class AirtableAdapter(ConfigurableAdapter):
             "Content-Type": "application/json"
         }
     
+    def _rate_limited_request(self, method: str, url: str, **kwargs):
+        """
+        Make a rate-limited request to Airtable API.
+        Ensures we don't exceed 5 requests per second.
+        """
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_request_interval:
+            time.sleep(self._min_request_interval - elapsed)
+        
+        response = getattr(requests, method)(url, **kwargs)
+        self._last_request_time = time.time()
+        return response
+    
     def _fetch_all_records(self, base_id: str, table_name: str, 
                           view_id: Optional[str] = None,
-                          token_key: str = 'PERSONAL_ACCESS_TOKEN') -> List[Dict[str, Any]]:
+                          token_key: str = 'PERSONAL_ACCESS_TOKEN',
+                          max_retries: int = 3) -> List[Dict[str, Any]]:
         """
         Fetch all records from an Airtable table (handles pagination).
         
@@ -49,6 +68,7 @@ class AirtableAdapter(ConfigurableAdapter):
             table_name: Table name or ID
             view_id: Optional view ID to filter records
             token_key: Config key for the access token
+            max_retries: Maximum number of retries for failed requests
             
         Returns:
             List of all records
@@ -66,9 +86,29 @@ class AirtableAdapter(ConfigurableAdapter):
             if offset:
                 params['offset'] = offset
             
-            response = requests.get(endpoint, headers=headers, params=params)
-            response.raise_for_status()
-            response_json = response.json()
+            # Retry logic for failed requests
+            for attempt in range(max_retries):
+                try:
+                    response = self._rate_limited_request('get', endpoint, headers=headers, params=params, timeout=30)
+                    response.raise_for_status()
+                    response_json = response.json()
+                    break
+                except requests.exceptions.Timeout:
+                    if attempt < max_retries - 1:
+                        print(f"Timeout fetching from {endpoint}, retrying (attempt {attempt + 1}/{max_retries})...")
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                    else:
+                        raise
+                except requests.exceptions.HTTPError as e:
+                    if response.status_code == 429:  # Rate limited
+                        if attempt < max_retries - 1:
+                            wait_time = 60 * (attempt + 1)
+                            print(f"Rate limited, waiting {wait_time} seconds...")
+                            time.sleep(wait_time)
+                        else:
+                            raise
+                    else:
+                        raise
             
             records = response_json.get('records', [])
             all_records.extend(records)
@@ -255,7 +295,7 @@ class AirtableAdapter(ConfigurableAdapter):
         if record_id in cache:
             return cache[record_id]
         
-        response = requests.get(f"{endpoint}/{record_id}", headers=headers)
+        response = self._rate_limited_request('get', f"{endpoint}/{record_id}", headers=headers, timeout=30)
         if response.status_code == 200:
             data = response.json()
             value = data['fields'].get(field_name)
@@ -280,11 +320,14 @@ class AirtableAdapter(ConfigurableAdapter):
         elif not insert_geo and 'geometry' in gdf.columns:
             gdf.drop(columns=['geometry'], inplace=True)
         
-        for col in gdf.columns:
-            if gdf[col].dtype == 'datetime64[ns]':
-                gdf[col] = gdf[col].astype(str)
-            if gdf[col].dtype == 'O':
-                gdf[col] = gdf[col].astype(str)
+        # Optimized: Convert datatypes using vectorized operations
+        datetime_cols = gdf.select_dtypes(include=['datetime64']).columns
+        if len(datetime_cols) > 0:
+            gdf[datetime_cols] = gdf[datetime_cols].astype(str)
+        
+        object_cols = gdf.select_dtypes(include=['object']).columns
+        if len(object_cols) > 0:
+            gdf[object_cols] = gdf[object_cols].astype(str)
         
         gdf.fillna('', inplace=True)
         records = gdf.to_dict('records')
@@ -298,22 +341,22 @@ class AirtableAdapter(ConfigurableAdapter):
         if delete_all:
             self._delete_all_records(headers, api_url)
         
-        # Batch insert
+        # Batch insert with rate limiting
         batch_size = 10
         chunks = [records[i:i + batch_size] for i in range(0, len(records), batch_size)]
         
         for chunk in chunks:
             json_call = {"records": [{"fields": record} for record in chunk]}
-            response = requests.post(api_url, headers=headers, json=json_call)
-            time.sleep(0.2)
+            response = self._rate_limited_request('post', api_url, headers=headers, json=json_call, timeout=30)
             if response.status_code != 200:
                 print("Error:", response.text)
     
     def _delete_all_records(self, headers: Dict[str, str], api_url: str) -> bool:
-        """Delete all records from an Airtable table."""
+        """Delete all records from an Airtable table using batch operations."""
         all_record_ids = []
         
-        response = requests.get(api_url, headers=headers)
+        # Fetch all record IDs with pagination
+        response = self._rate_limited_request('get', api_url, headers=headers, timeout=30)
         if response.status_code != 200:
             print("Error fetching record IDs:", response.text)
             return False
@@ -325,17 +368,21 @@ class AirtableAdapter(ConfigurableAdapter):
         response_json = response.json()
         while 'offset' in response_json:
             offset = response_json.get('offset')
-            response = requests.get(f"{api_url}?offset={offset}", headers=headers)
+            response = self._rate_limited_request('get', f"{api_url}?offset={offset}", headers=headers, timeout=30)
             response_json = response.json()
             records = response_json.get('records', [])
             all_record_ids.extend([record['id'] for record in records])
         
-        # Delete the records using their IDs
-        for record_id in all_record_ids:
-            del_response = requests.delete(f"{api_url}/{record_id}", headers=headers)
-            time.sleep(0.2)
+        # Delete in batches of 10 (Airtable's batch limit)
+        batch_size = 10
+        for i in range(0, len(all_record_ids), batch_size):
+            batch = all_record_ids[i:i+batch_size]
+            # Airtable batch delete format: DELETE with records[]= parameters
+            params = '&'.join([f'records[]={rec_id}' for rec_id in batch])
+            del_response = self._rate_limited_request('delete', f"{api_url}?{params}", headers=headers, timeout=30)
+            
             if del_response.status_code != 200:
-                print(f"Error deleting record {record_id}:", del_response.text)
+                print(f"Error deleting batch starting at index {i}: {del_response.text}")
         
         return True
     
@@ -344,8 +391,20 @@ class AirtableAdapter(ConfigurableAdapter):
         df = pd.DataFrame({'Event': [event], 'Info': [info]})
         self.upload_results(df, "Logs", insert_geo=False, delete_all=False)
     
-    def clear_tables(self, table_names: List[str]) -> None:
-        """Clear multiple Airtable tables using webhooks."""
+    def clear_tables(self, table_names: List[str], max_retries: int = 3, retry_count: int = 0) -> None:
+        """
+        Clear multiple Airtable tables using webhooks.
+        
+        Args:
+            table_names: List of table names to clear
+            max_retries: Maximum number of retry attempts
+            retry_count: Current retry count (internal use)
+        """
+        # Prevent infinite recursion
+        if retry_count >= max_retries:
+            print(f"Warning: Failed to clear tables after {max_retries} retries: {table_names}")
+            return
+        
         # Trigger webhooks twice for reliability
         for table in table_names:
             self._trigger_delete_webhook(table)
@@ -366,13 +425,14 @@ class AirtableAdapter(ConfigurableAdapter):
                 "Content-Type": "application/json"
             }
             
-            response = requests.get(endpoint, headers=headers)
+            response = self._rate_limited_request('get', endpoint, headers=headers, timeout=30)
             response_json = response.json()
             if len(response_json.get('records', [])) > 0:
                 delete_again.append(table_name)
         
         if len(delete_again) > 0:
-            self.clear_tables(delete_again)
+            print(f"Retrying deletion for tables: {delete_again} (attempt {retry_count + 1}/{max_retries})")
+            self.clear_tables(delete_again, max_retries, retry_count + 1)
         
         time.sleep(10)
     
@@ -428,7 +488,7 @@ class AirtableAdapter(ConfigurableAdapter):
         endpoint = f"https://api.airtable.com/v0/{base_id}/{table_name}"
         headers = self._get_headers()
         
-        response = requests.get(f"{endpoint}/{record_id}", headers=headers)
+        response = self._rate_limited_request('get', f"{endpoint}/{record_id}", headers=headers, timeout=30)
         if response.status_code == 200:
             data = response.json()
             value = data['fields'].get(field_name)

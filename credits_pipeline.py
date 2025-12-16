@@ -65,7 +65,7 @@ def run_biocredits_pipeline(adapter):
         lands = gdf_normalized.merge(land_metadata, on='plot_id', how='left')
         
         subtypes = load_shp('credit_subtypes/SHP/')
-        platinum = subtypes['hotspots'].unary_union
+        platinum = subtypes['hotspots'].union_all()
         value_lands, platinum_gdf = create_value_lands(lands, platinum)
         fig = plot_value_lands(value_lands, platinum_gdf, filename='plots_value.html')
         insert_log_entry(adapter, 'Plots with value (platinum, gold):', 
