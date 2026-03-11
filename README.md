@@ -165,6 +165,58 @@ class MyCustomAdapter(ConfigurableAdapter):
 
 See `example_postgres_adapter.py` and `example_rest_api_adapter.py` for complete examples.
 
+## FastAPI Public API (Partner-facing)
+
+This repository now includes a FastAPI alternative for external partner integrations, designed with Stripe-like resource naming and docs UX.
+
+### What it includes
+
+- Versioned endpoints under `/v1`
+- API key authentication via Bearer tokens
+- Idempotent request creation (`Idempotency-Key` header)
+- Clear separation between request inputs and derived credit outputs
+- Custom documentation guide page at `/docs/guide` (also available at `/`)
+- OpenAPI reference at `/reference` and ReDoc at `/redoc`
+
+### Main endpoints
+
+- `POST /v1/credit_calculation_requests`
+- `GET /v1/credit_calculation_requests/{request_id}`
+- `GET /v1/credit_results/{result_id}`
+- `GET /v1/calculation_profiles`
+- `GET /v1/species_catalog`
+- `GET /v1/dashboard/summary`
+- `POST /v1/dashboard/seed_demo` (demo helper for visualization data)
+- `GET /v1/health`
+
+### Run locally
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Set API keys explicitly (no implicit default config):
+   ```bash
+   export BIOCREDITS_API_KEYS='[
+     {"key":"sk_live_demo","partner_id":"partner_demo","scopes":["calc:write","calc:read","catalog:read"]}
+   ]'
+   ```
+   On Windows PowerShell:
+   ```powershell
+   $env:BIOCREDITS_API_KEYS='[{"key":"sk_live_demo","partner_id":"partner_demo","scopes":["calc:write","calc:read","catalog:read"]}]'
+   ```
+
+3. Start the server:
+   ```bash
+   uvicorn api.main:app --reload
+   ```
+
+4. Open docs:
+   - Guide: `http://localhost:8000/docs/guide`
+   - API reference: `http://localhost:8000/reference`
+   - Partner dashboard: `http://localhost:8000/dashboard`
+
 ### Function Signatures
 
 Functions that interact with data sources now accept an `adapter` parameter:

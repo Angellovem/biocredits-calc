@@ -9,3 +9,6 @@ matplotlib
 jupyter
 plotly
 requests
+fastapi
+uvicorn
+jinja2

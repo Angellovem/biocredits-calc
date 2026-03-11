@@ -1,0 +1,166 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Inter", "Segoe UI", Arial, sans-serif;
+  background: #f7fcf5;
+  color: #28432d;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 18px;
+  background: #93d97e;
+  border-bottom: 1px solid #7fcc6a;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: linear-gradient(45deg, #b9e9a8, #4ca96a);
+}
+
+nav a {
+  margin-left: 12px;
+  color: #1f4528;
+  text-decoration: none;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.auth-card,
+.card,
+.kpi {
+  background: #fff;
+  border: 1px solid #d9edd3;
+  border-radius: 12px;
+}
+
+.auth-card {
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.auth-row {
+  display: flex;
+  gap: 10px;
+}
+
+input {
+  flex: 1;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #cfe8c7;
+}
+
+button {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #6fbe5e;
+  background: #93d97e;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: #f0f8ed;
+  border-color: #9ac98e;
+}
+
+.status {
+  margin-top: 8px;
+  color: #466a4d;
+}
+
+.status.error {
+  color: #9f2d2d;
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.kpi {
+  padding: 14px;
+}
+
+.kpi h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: #55725a;
+}
+
+.kpi p {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.card {
+  padding: 16px;
+}
+
+.chart-subtitle {
+  margin: 0 0 8px;
+  color: #5a7a60;
+  font-size: 13px;
+}
+
+canvas {
+  width: 100% !important;
+  height: 300px !important;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 9px 6px;
+  border-bottom: 1px solid #e6f0e3;
+  font-size: 14px;
+}
+
+.hidden {
+  display: none;
+}
+
+@media (max-width: 980px) {
+  .kpis {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .charts {
+    grid-template-columns: 1fr;
+  }
+}
+
+

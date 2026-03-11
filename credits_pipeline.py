@@ -7,11 +7,13 @@ interface, allowing easy switching between different data sources (Airtable, Pos
 Usage:
     python credits_pipeline.py
 
-The adapter is initialized from config.json. To switch data sources, change the adapter class:
-    adapter = AirtableAdapter()  # Current
+The adapter is initialized with an explicit config load from config.json.
+To switch data sources, change the adapter class:
+    adapter = AirtableAdapter(config=config)  # Current
     # adapter = PostgresAdapter()  # Future alternative
 """
 import pytz
+import json
 import traceback
 from datetime import datetime
 
@@ -27,6 +29,21 @@ from calc_utils import (
 
 # Import data adapter
 from airtable_adapter import AirtableAdapter
+
+def load_required_config(config_path: str = 'config.json'):
+    """
+    Load configuration explicitly from disk.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+        ValueError: If config content is not a JSON object.
+    """
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    if not isinstance(config, dict):
+        raise ValueError(f"Invalid config format in {config_path}: expected JSON object.")
+    return config
 
 
 def run_biocredits_pipeline(adapter):
@@ -163,9 +180,10 @@ def run_biocredits_pipeline(adapter):
 
 
 if __name__ == "__main__":
-    # Initialize adapter (uses config.json by default)
+    # Initialize adapter with explicit config loading.
     print("Initializing Airtable adapter...")
-    adapter = AirtableAdapter()
+    config = load_required_config('config.json')
+    adapter = AirtableAdapter(config=config)
     
     # To use a different data source, simply change the adapter:
     # from postgres_adapter import PostgresAdapter

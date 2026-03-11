@@ -111,12 +111,13 @@ class ConfigurableAdapter(DataAdapter):
         Initialize adapter with configuration.
         
         Args:
-            config: Configuration dictionary. If None, loads from config.json
+            config: Configuration dictionary. Must be explicitly provided.
         """
         if config is None:
-            import json
-            with open('config.json', 'r') as f:
-                config = json.load(f)
+            raise ValueError(
+                "ConfigurableAdapter requires an explicit config dictionary. "
+                "Load your config in the caller and pass it to the adapter."
+            )
         self.config = config
     
     def get_config_value(self, *keys: str, default: Any = None) -> Any:
